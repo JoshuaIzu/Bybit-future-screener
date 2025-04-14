@@ -18,21 +18,21 @@ st.set_page_config(
 )
 
 # Title and description
-st.title("📈 Hyperliquid Futures Market Screener")
+st.title("📈 Bybit Futures Market Screener")
 st.markdown("Track and analyze cryptocurrency futures markets on Bybit")
 
 # Initialize Bybit connection
 @st.cache_resource
 def get_exchange():
-    return ccxt.hyperliquid({
+    return ccxt.bybit({
         'options': {
             'defaultType': 'future',
             'adjustForTimeDifference': True,
         },
         'urls': {
             'api': {
-                'public': 'https://api.hyperliquid.com',  # ← Global endpoint
-                'private': 'https://api.hyperliquid.com',
+                'public': 'https://api.bybit.com',  # ← Global endpoint
+                'private': 'https://api.bybit.com',
             }
         },
         'enableRateLimit': True,
