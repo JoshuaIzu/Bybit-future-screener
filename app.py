@@ -22,22 +22,29 @@ st.title("📈 Bybit Futures Market Screener")
 st.markdown("Track and analyze cryptocurrency futures markets on Bybit")
 
 # Initialize Bybit connection
-@st.cache_resource
+@st.cache_resource(ttl=60*5)
 def get_exchange():
     return ccxt.bybit({
         'options': {
             'defaultType': 'future',
             'adjustForTimeDifference': True,
+            'recvWindow': 10000,
+            'createMarketBuyOrderRequiresPrice': False
         },
         'urls': {
             'api': {
-                'public': 'https://api.bybit.com',  # ← Global endpoint
-                'private': 'https://api.bybit.com',
+                'public': 'https://api.bybit.com',  # Corrected endpoint
+                'private': 'https://api.bybit.com'
             }
         },
         'enableRateLimit': True,
+        'timeout': 30000,
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json'
+        },
+        'rateLimit': 500  # 2 requests per second
     })
-
 exchange = get_exchange()
 
 # Configuration
