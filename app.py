@@ -10,6 +10,7 @@ from tabulate import tabulate
 from datetime import datetime, timedelta
 import sqlite3
 import time
+import threading
 
 # Set page config
 st.set_page_config(
@@ -27,15 +28,16 @@ st.markdown("Track and analyze cryptocurrency futures markets on Bybit")
 def get_exchange():
     return ccxt.bybit({
         'options': {
-            'defaultType': 'future',
+            'defaultType': 'future',  # Ensure futures market
             'recvWindow': 10000,
         },
-        # Removed custom urls to use ccxt's default V5 endpoints
+        'headers': {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        },  # Add User-Agent to bypass potential CloudFront restrictions
     })
 
 exchange = get_exchange()
-# Optional: Enable verbose mode for debugging API requests
-# exchange.verbose = True  # Uncomment to debug
+exchange.verbose = True  # Enable verbose logging to debug API requests
 
 # Configuration
 BASE_VOL = 0.35
@@ -93,6 +95,16 @@ with st.sidebar:
     BASE_VOL = st.slider("Base Volume Threshold", 0.1, 2.0, 0.35, 0.05)
     VOL_MULTIPLIER = st.slider("Volume Multiplier", 1.0, 3.0, 1.5, 0.1)
     MIN_LIQUIDITY = st.number_input("Minimum Liquidity (USD)", 1000000, 20000000, 5000000, 1000000)
+    # Add toggle for high traffic simulation
+    simulate_traffic = st.checkbox("Simulate High API Traffic", value=False)
+
+# Function to fetch ticker data for a single symbol (used for high traffic simulation)
+def fetch_ticker_for_symbol(symbol):
+    try:
+        ticker = exchange.fetch_ticker(symbol)
+        return ticker
+    except Exception as e:
+        return None
 
 class ForwardTester:
     def __init__(self):
@@ -214,34 +226,70 @@ class ForwardTester:
 
 # Function to fetch all markets and filter
 @st.cache_data(ttl=600)
-def fetch_all_markets():
-    """Fetch all USDT perpetual markets from Bybit"""
+def fetch_all_markets(_simulate_traffic=False):
+    """Fetch all USDT perpetual markets from Bybit with optional traffic simulation"""
     try:
         markets = exchange.load_markets()
+        # Explicitly filter for linear (USDT-margined) perpetual futures
         usdt_perps = [
             symbol for symbol, market in markets.items()
-            if market['quote'] == 'USDT' and market['type'] == 'swap'
+            if market['quote'] == 'USDT' and market['type'] == 'swap' and market['contract'] and market['linear']
         ]
         
         results = []
+        threads = []
+        
         for symbol in usdt_perps:
-            try:
-                ticker = exchange.fetch_ticker(symbol)
-                volume_24h = ticker['quoteVolume']
-                
-                # Skip low liquidity markets
-                if volume_24h < MIN_LIQUIDITY:
-                    continue
-                
-                results.append({
-                    'symbol': symbol,
-                    'last_price': ticker['last'],
-                    'volume_24h': volume_24h,
-                    'change_24h': ticker['percentage']
-                })
-            except Exception as e:
-                pass
-                
+            if _simulate_traffic:
+                # Simulate high traffic by sending multiple requests per symbol
+                for _ in range(3):  # Send 3 requests per symbol
+                    thread = threading.Thread(target=lambda s=symbol: fetch_ticker_for_symbol(s))
+                    threads.append(thread)
+                    thread.start()
+                # Minimal delay to simulate rapid requests
+                time.sleep(0.1)
+            else:
+                # Normal operation with delay to avoid rate limits
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    volume_24h = ticker['quoteVolume']
+                    
+                    # Skip low liquidity markets
+                    if volume_24h < MIN_LIQUIDITY:
+                        continue
+                    
+                    results.append({
+                        'symbol': symbol,
+                        'last_price': ticker['last'],
+                        'volume_24h': volume_24h,
+                        'change_24h': ticker['percentage']
+                    })
+                except Exception as e:
+                    pass
+                time.sleep(0.5)  # Delay to avoid rate limits
+            
+        # Wait for all threads to complete in high traffic mode
+        if _simulate_traffic:
+            for thread in threads:
+                thread.join()
+            # Fetch tickers normally after simulation to ensure data
+            for symbol in usdt_perps:
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    volume_24h = ticker['quoteVolume']
+                    
+                    if volume_24h < MIN_LIQUIDITY:
+                        continue
+                    
+                    results.append({
+                        'symbol': symbol,
+                        'last_price': ticker['last'],
+                        'volume_24h': volume_24h,
+                        'change_24h': ticker['percentage']
+                    })
+                except Exception as e:
+                    pass
+        
         return pd.DataFrame(results)
     except Exception as e:
         st.error(f"Error fetching markets: {str(e)}")
@@ -297,7 +345,7 @@ init_market_cache()
 def generate_signals(markets_df=None):
     """Generate trading signals based on volume analysis"""
     if markets_df is None:
-        markets_df = fetch_all_markets()
+        markets_df = fetch_all_markets(simulate_traffic)
     
     signals = []
     
@@ -308,7 +356,7 @@ def generate_signals(markets_df=None):
         symbol = market['symbol']
         status_text.text(f"Analyzing {symbol}...")
         
-        # Fetch 30-minute data for the specific time range (from URL)
+        # Fetch 30-minute data for the specific time range
         df = fetch_ohlcv(symbol, timeframe='30m', since=1746583680, limit=400)
         if df is None or len(df) < 24:
             continue
@@ -353,8 +401,7 @@ def generate_signals(markets_df=None):
         
         # Update progress
         progress_bar.progress((i + 1) / len(markets_df))
-        # Add delay to avoid rate limits
-        time.sleep(0.5)
+        time.sleep(0.5)  # Keep delay to avoid rate limits
     
     progress_bar.empty()
     status_text.empty()
@@ -371,7 +418,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Market Scanner", "Active Trades", "Comp
 with tab1:
     if st.button("Scan Markets"):
         with st.spinner("Scanning all Bybit perpetual markets..."):
-            markets_df = fetch_all_markets()
+            markets_df = fetch_all_markets(simulate_traffic)
             st.session_state.signals = generate_signals(markets_df)
     
     if 'signals' in st.session_state and st.session_state.signals:
