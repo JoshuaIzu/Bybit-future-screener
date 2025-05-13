@@ -9,6 +9,7 @@ import plotly.express as px
 from tabulate import tabulate
 from datetime import datetime, timedelta
 import sqlite3
+import time
 
 # Set page config
 st.set_page_config(
@@ -29,15 +30,12 @@ def get_exchange():
             'defaultType': 'future',
             'recvWindow': 10000,
         },
-        'urls': {
-            'api': {
-                'public': 'https://api.bybit.com',  # Corrected endpoint
-                'private': 'https://api.bybit.com'
-            }
-        },
-    
+        # Removed custom urls to use ccxt's default V5 endpoints
     })
+
 exchange = get_exchange()
+# Optional: Enable verbose mode for debugging API requests
+# exchange.verbose = True  # Uncomment to debug
 
 # Configuration
 BASE_VOL = 0.35
@@ -251,10 +249,12 @@ def fetch_all_markets():
 
 # Function to fetch OHLCV data
 @st.cache_data(ttl=300)
-def fetch_ohlcv(symbol, timeframe='1h', limit=500):
-    """Fetch OHLCV data for a symbol"""
+def fetch_ohlcv(symbol, timeframe='30m', since=None, limit=500):
+    """Fetch OHLCV data for a symbol with optional time range"""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if since:
+            since = since * 1000  # Convert seconds to milliseconds for ccxt
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         return df
@@ -308,8 +308,8 @@ def generate_signals(markets_df=None):
         symbol = market['symbol']
         status_text.text(f"Analyzing {symbol}...")
         
-        # Fetch hourly data
-        df = fetch_ohlcv(symbol, timeframe='1h', limit=168)  # 7 days
+        # Fetch 30-minute data for the specific time range (from URL)
+        df = fetch_ohlcv(symbol, timeframe='30m', since=1746583680, limit=400)
         if df is None or len(df) < 24:
             continue
             
@@ -353,6 +353,8 @@ def generate_signals(markets_df=None):
         
         # Update progress
         progress_bar.progress((i + 1) / len(markets_df))
+        # Add delay to avoid rate limits
+        time.sleep(0.5)
     
     progress_bar.empty()
     status_text.empty()
@@ -433,7 +435,7 @@ with tab2:
         selected_trade = st.selectbox("Select a trade to view", list(tester.active_trades.keys()))
         
         if selected_trade:
-            timeframe = st.selectbox("Timeframe", ['1h', '4h', '1d'], index=0)
+            timeframe = st.selectbox("Timeframe", ['30m', '1h', '4h', '1d'], index=0)
             ohlcv_df = fetch_ohlcv(selected_trade, timeframe=timeframe, limit=100)
             
             if ohlcv_df is not None:
