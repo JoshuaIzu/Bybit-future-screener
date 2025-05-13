@@ -1,4 +1,4 @@
-```python
+
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -578,4 +578,4 @@ with tab5:
 
 # Update timestamp in the footer
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-```
+
