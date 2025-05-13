@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import numpy as np
 import pandas as pd
@@ -11,6 +12,7 @@ import sqlite3
 import time
 import threading
 import logging
+import backoff
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -31,6 +33,7 @@ st.markdown("Track and analyze cryptocurrency futures markets on KuCoin")
 @st.cache_resource()
 def get_exchange():
     exchange = ccxt.kucoin({
+        'enableRateLimit': True,  # Enable built-in rate limiting
         'options': {
             'defaultType': 'future',  # Use USDT-margined perpetual futures
             'recvWindow': 10000,
@@ -47,7 +50,7 @@ exchange = get_exchange()
 # Configuration
 BASE_VOL = 0.35
 VOL_MULTIPLIER = 1.5
-MIN_LIQUIDITY = 5000000
+MIN_LIQUIDITY = 1000000  # Lowered to capture more markets
 
 # Database functions for state management
 def load_state_from_db():
@@ -94,10 +97,11 @@ with st.sidebar:
     st.header("Parameters")
     BASE_VOL = st.slider("Base Volume Threshold", 0.1, 2.0, 0.35, 0.05)
     VOL_MULTIPLIER = st.slider("Volume Multiplier", 1.0, 3.0, 1.5, 0.1)
-    MIN_LIQUIDITY = st.number_input("Minimum Liquidity (USD)", 1000000, 20000000, 5000000, 1000000)
+    MIN_LIQUIDITY = st.number_input("Minimum Liquidity (USD)", 100000, 5000000, 1000000, 100000)
     simulate_traffic = st.checkbox("Simulate High API Traffic", value=False)
 
-# Function to fetch ticker data for a single symbol
+# Function to fetch ticker data with retry
+@backoff.on_exception(backoff.expo, Exception, max_tries=3)
 def fetch_ticker_for_symbol(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -105,7 +109,7 @@ def fetch_ticker_for_symbol(symbol):
         return ticker
     except Exception as e:
         logger.error(f"Error fetching ticker for {symbol}: {str(e)}")
-        return None
+        raise
 
 class ForwardTester:
     def __init__(self):
@@ -151,7 +155,7 @@ class ForwardTester:
         updates = []
         for symbol, trade in self.active_trades.items():
             try:
-                ticker = exchange.fetch_ticker(symbol)
+                ticker = fetch_ticker_for_symbol(symbol)
                 current_price = ticker['last']
                 entry_price = trade['entry_price']
                 if trade['direction'] == "LONG":
@@ -210,11 +214,12 @@ def fetch_all_markets(_simulate_traffic=False):
     try:
         logger.info("Loading markets...")
         markets = exchange.load_markets()
+        # Broaden filter to capture all USDT futures
         usdt_perps = [
             symbol for symbol, market in markets.items()
-            if market['quote'] == 'USDT' and market['type'] == 'future' and market['contract'] and market['linear']
+            if 'USDT' in symbol and market['type'] == 'future' and market['contract']
         ]
-        logger.info(f"Found {len(usdt_perps)} USDT perpetual futures symbols")
+        logger.info(f"Found {len(usdt_perps)} USDT futures symbols: {usdt_perps}")
         
         results = []
         threads = []
@@ -228,11 +233,13 @@ def fetch_all_markets(_simulate_traffic=False):
                     thread = threading.Thread(target=lambda s=symbol: fetch_ticker_for_symbol(s))
                     threads.append(thread)
                     thread.start()
-                time.sleep(0.2)  # Increased delay to avoid rate limits
+                time.sleep(0.3)  # Increased delay
             else:
                 try:
-                    ticker = exchange.fetch_ticker(symbol)
-                    volume_24h = ticker['quoteVolume']
+                    ticker = fetch_ticker_for_symbol(symbol)
+                    if ticker is None:
+                        continue
+                    volume_24h = ticker.get('quoteVolume', 0)
                     if volume_24h < MIN_LIQUIDITY:
                         logger.info(f"Skipping {symbol}: Low liquidity ({volume_24h} < {MIN_LIQUIDITY})")
                         continue
@@ -240,12 +247,12 @@ def fetch_all_markets(_simulate_traffic=False):
                         'symbol': symbol,
                         'last_price': ticker['last'],
                         'volume_24h': volume_24h,
-                        'change_24h': ticker['percentage']
+                        'change_24h': ticker.get('percentage', 0)
                     })
                     logger.info(f"Processed {symbol} successfully")
                 except Exception as e:
-                    logger.error(f"Error fetching ticker for {symbol}: {str(e)}")
-                time.sleep(1.0)  # Increased delay to avoid rate limits
+                    logger.error(f"Failed to process {symbol}: {str(e)}")
+                time.sleep(1.5)  # Increased delay
         
         if _simulate_traffic:
             logger.info("Waiting for high traffic threads to complete...")
@@ -253,18 +260,20 @@ def fetch_all_markets(_simulate_traffic=False):
                 thread.join()
             for symbol in usdt_perps:
                 try:
-                    ticker = exchange.fetch_ticker(symbol)
-                    volume_24h = ticker['quoteVolume']
+                    ticker = fetch_ticker_for_symbol(symbol)
+                    if ticker is None:
+                        continue
+                    volume_24h = ticker.get('quoteVolume', 0)
                     if volume_24h < MIN_LIQUIDITY:
                         continue
                     results.append({
                         'symbol': symbol,
                         'last_price': ticker['last'],
                         'volume_24h': volume_24h,
-                        'change_24h': ticker['percentage']
+                        'change_24h': ticker.get('percentage', 0)
                     })
                 except Exception as e:
-                    logger.error(f"Error fetching ticker for {symbol} in post-simulation: {str(e)}")
+                    logger.error(f"Error in post-simulation for {symbol}: {str(e)}")
         
         status_text.empty()
         logger.info(f"Completed fetching markets. Total results: {len(results)}")
@@ -274,7 +283,8 @@ def fetch_all_markets(_simulate_traffic=False):
         st.error(f"Error fetching markets: {str(e)}")
         return pd.DataFrame()
 
-# Function to fetch OHLCV data
+# Function to fetch OHLCV data with retry
+@backoff.on_exception(backoff.expo, Exception, max_tries=3)
 @st.cache_data(ttl=300)
 def fetch_ohlcv(symbol, timeframe='30m', since=None, limit=500):
     """Fetch OHLCV data for a symbol with optional time range"""
@@ -338,7 +348,6 @@ def generate_signals(markets_df=None):
         status_text.text(f"Analyzing {symbol} ({i+1}/{len(markets_df)})...")
         logger.info(f"Generating signal for {symbol}")
         
-        # Use past timestamp to avoid future data issues
         df = fetch_ohlcv(symbol, timeframe='30m', since=1697057280, limit=400)
         if df is None or len(df) < 24:
             logger.warning(f"Skipping {symbol}: Insufficient OHLCV data")
@@ -379,7 +388,7 @@ def generate_signals(markets_df=None):
         })
         
         progress_bar.progress((i + 1) / len(markets_df))
-        time.sleep(1.0)  # Increased delay to avoid rate limits
+        time.sleep(1.5)  # Increased delay
     
     progress_bar.empty()
     status_text.empty()
@@ -395,7 +404,7 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Market Scanner", "Active Trades", "Comp
 # Tab 1: Market Scanner
 with tab1:
     if st.button("Scan Markets"):
-        with st.spinner("Scanning all KuCoin perpetual markets..."):
+        with st.spinner("Scanning all KuCoin futures markets..."):
             markets_df = fetch_all_markets(simulate_traffic)
             st.session_state.signals = generate_signals(markets_df)
     
@@ -423,7 +432,7 @@ with tab2:
         active_df = pd.DataFrame.from_dict(tester.active_trades, orient='index')
         for idx, row in active_df.iterrows():
             try:
-                ticker = exchange.fetch_ticker(idx)
+                ticker = fetch_ticker_for_symbol(idx)
                 current_price = ticker['last']
                 entry_price = row['entry_price']
                 active_df.at[idx, 'current_price'] = current_price
@@ -569,3 +578,4 @@ with tab5:
 
 # Update timestamp in the footer
 st.caption(f"Last updated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+```
