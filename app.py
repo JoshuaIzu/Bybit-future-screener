@@ -14,30 +14,30 @@ import threading
 
 # Set page config
 st.set_page_config(
-    page_title="Bybit Futures Screener",
+    page_title="Binance Futures Screener",
     page_icon="📊",
     layout="wide",
 )
 
 # Title and description
-st.title("📈 Bybit Futures Market Screener")
-st.markdown("Track and analyze cryptocurrency futures markets on Bybit")
+st.title("📈 Binance Futures Market Screener")
+st.markdown("Track and analyze cryptocurrency futures markets on Binance")
 
-# Initialize Bybit connection
+# Initialize Binance connection
 @st.cache_resource()
 def get_exchange():
-    return ccxt.bybit({
+    return ccxt.binance({
         'options': {
-            'defaultType': 'future',  # Ensure futures market
+            'defaultType': 'future',
             'recvWindow': 10000,
         },
         'headers': {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        },  # Add User-Agent to bypass potential CloudFront restrictions
+        },
     })
 
 exchange = get_exchange()
-exchange.verbose = True  # Enable verbose logging to debug API requests
+exchange.verbose = True
 
 # Configuration
 BASE_VOL = 0.35
@@ -49,7 +49,6 @@ def load_state_from_db():
     conn = sqlite3.connect('trading_state.db')
     cursor = conn.cursor()
     
-    # Create table if it doesn't exist
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS app_state (
         key TEXT PRIMARY KEY,
@@ -57,12 +56,10 @@ def load_state_from_db():
     )
     ''')
     
-    # Get active trades
     cursor.execute('SELECT value FROM app_state WHERE key = "active_trades"')
     active_trades_row = cursor.fetchone()
     active_trades = json.loads(active_trades_row[0]) if active_trades_row else {}
     
-    # Get completed trades
     cursor.execute('SELECT value FROM app_state WHERE key = "completed_trades"')
     completed_trades_row = cursor.fetchone()
     completed_trades = json.loads(completed_trades_row[0]) if completed_trades_row else []
@@ -74,13 +71,11 @@ def save_state_to_db(active_trades, completed_trades):
     conn = sqlite3.connect('trading_state.db')
     cursor = conn.cursor()
     
-    # Save active trades
     cursor.execute('''
     INSERT OR REPLACE INTO app_state (key, value)
     VALUES (?, ?)
     ''', ('active_trades', json.dumps(active_trades)))
     
-    # Save completed trades
     cursor.execute('''
     INSERT OR REPLACE INTO app_state (key, value)
     VALUES (?, ?)
@@ -95,10 +90,9 @@ with st.sidebar:
     BASE_VOL = st.slider("Base Volume Threshold", 0.1, 2.0, 0.35, 0.05)
     VOL_MULTIPLIER = st.slider("Volume Multiplier", 1.0, 3.0, 1.5, 0.1)
     MIN_LIQUIDITY = st.number_input("Minimum Liquidity (USD)", 1000000, 20000000, 5000000, 1000000)
-    # Add toggle for high traffic simulation
     simulate_traffic = st.checkbox("Simulate High API Traffic", value=False)
 
-# Function to fetch ticker data for a single symbol (used for high traffic simulation)
+# Function to fetch ticker data for a single symbol
 def fetch_ticker_for_symbol(symbol):
     try:
         ticker = exchange.fetch_ticker(symbol)
@@ -113,26 +107,22 @@ class ForwardTester:
         self.load_state()
         
     def load_state(self):
-        """Load previous trading state from database"""
         try:
             self.active_trades, self.completed_trades = load_state_from_db()
         except Exception as e:
             st.warning(f"Could not load previous state: {str(e)}. Starting fresh.")
     
     def save_state(self):
-        """Save current trading state to database"""
         try:
             save_state_to_db(self.active_trades, self.completed_trades)
         except Exception as e:
             st.error(f"Error saving state to database: {str(e)}")
     
     def execute_trades(self, signals):
-        """Execute new trades based on signals"""
         executed = []
         for signal in signals:
             symbol = signal['Symbol']
             
-            # Skip if already in active trades
             if symbol in self.active_trades:
                 continue
                 
@@ -153,7 +143,6 @@ class ForwardTester:
         return executed
     
     def update_trades(self):
-        """Check open trades for TP/SL hits"""
         to_remove = []
         updates = []
         
@@ -163,7 +152,6 @@ class ForwardTester:
                 current_price = ticker['last']
                 entry_price = trade['entry_price']
                 
-                # Check for TP/SL
                 if trade['direction'] == "LONG":
                     if trade['tp_price'] and current_price >= trade['tp_price']:
                         trade['exit_reason'] = "TP Hit"
@@ -175,7 +163,6 @@ class ForwardTester:
                     elif trade['sl_price'] and current_price >= trade['sl_price']:
                         trade['exit_reason'] = "SL Hit"
                 
-                # Mark for removal if closed
                 if 'exit_reason' in trade:
                     trade['exit_price'] = current_price
                     trade['exit_time'] = datetime.now().isoformat()
@@ -188,7 +175,6 @@ class ForwardTester:
             except Exception as e:
                 updates.append(f"Error updating {symbol}: {str(e)}")
         
-        # Remove closed trades
         for symbol in to_remove:
             self.active_trades.pop(symbol)
         
@@ -196,7 +182,6 @@ class ForwardTester:
         return updates
     
     def get_performance_report(self):
-        """Generate performance report"""
         if not self.completed_trades:
             return "No completed trades yet", pd.DataFrame()
             
@@ -218,7 +203,6 @@ class ForwardTester:
         return stats, df
 
     def reset_all_trades(self):
-        """Reset all trades in the database"""
         self.active_trades = {}
         self.completed_trades = []
         self.save_state()
@@ -227,13 +211,11 @@ class ForwardTester:
 # Function to fetch all markets and filter
 @st.cache_data(ttl=600)
 def fetch_all_markets(_simulate_traffic=False):
-    """Fetch all USDT perpetual markets from Bybit with optional traffic simulation"""
     try:
         markets = exchange.load_markets()
-        # Explicitly filter for linear (USDT-margined) perpetual futures
         usdt_perps = [
             symbol for symbol, market in markets.items()
-            if market['quote'] == 'USDT' and market['type'] == 'swap' and market['contract'] and market['linear']
+            if market['quote'] == 'USDT' and market['type'] == 'future' and market['contract'] and market['linear']
         ]
         
         results = []
@@ -241,20 +223,16 @@ def fetch_all_markets(_simulate_traffic=False):
         
         for symbol in usdt_perps:
             if _simulate_traffic:
-                # Simulate high traffic by sending multiple requests per symbol
-                for _ in range(3):  # Send 3 requests per symbol
+                for _ in range(3):
                     thread = threading.Thread(target=lambda s=symbol: fetch_ticker_for_symbol(s))
                     threads.append(thread)
                     thread.start()
-                # Minimal delay to simulate rapid requests
                 time.sleep(0.1)
             else:
-                # Normal operation with delay to avoid rate limits
                 try:
                     ticker = exchange.fetch_ticker(symbol)
                     volume_24h = ticker['quoteVolume']
                     
-                    # Skip low liquidity markets
                     if volume_24h < MIN_LIQUIDITY:
                         continue
                     
@@ -266,13 +244,11 @@ def fetch_all_markets(_simulate_traffic=False):
                     })
                 except Exception as e:
                     pass
-                time.sleep(0.5)  # Delay to avoid rate limits
+                time.sleep(0.5)
             
-        # Wait for all threads to complete in high traffic mode
         if _simulate_traffic:
             for thread in threads:
                 thread.join()
-            # Fetch tickers normally after simulation to ensure data
             for symbol in usdt_perps:
                 try:
                     ticker = exchange.fetch_ticker(symbol)
@@ -298,10 +274,9 @@ def fetch_all_markets(_simulate_traffic=False):
 # Function to fetch OHLCV data
 @st.cache_data(ttl=300)
 def fetch_ohlcv(symbol, timeframe='30m', since=None, limit=500):
-    """Fetch OHLCV data for a symbol with optional time range"""
     try:
         if since:
-            since = since * 1000  # Convert seconds to milliseconds for ccxt
+            since = since * 1000
         ohlcv = exchange.fetch_ohlcv(symbol, timeframe, since=since, limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
@@ -315,7 +290,6 @@ def init_market_cache():
     conn = sqlite3.connect('market_cache.db')
     cursor = conn.cursor()
     
-    # Create markets table if it doesn't exist
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS market_cache (
         symbol TEXT PRIMARY KEY,
@@ -324,7 +298,6 @@ def init_market_cache():
     )
     ''')
     
-    # Create OHLCV table if it doesn't exist
     cursor.execute('''
     CREATE TABLE IF NOT EXISTS ohlcv_cache (
         symbol TEXT,
@@ -343,7 +316,6 @@ init_market_cache()
 
 # Function to analyze and generate signals
 def generate_signals(markets_df=None):
-    """Generate trading signals based on volume analysis"""
     if markets_df is None:
         markets_df = fetch_all_markets(simulate_traffic)
     
@@ -356,12 +328,10 @@ def generate_signals(markets_df=None):
         symbol = market['symbol']
         status_text.text(f"Analyzing {symbol}...")
         
-        # Fetch 30-minute data for the specific time range
         df = fetch_ohlcv(symbol, timeframe='30m', since=1746583680, limit=400)
         if df is None or len(df) < 24:
             continue
             
-        # Calculate volume metrics
         avg_vol = df['volume'].mean()
         recent_vol = df['volume'].iloc[-1]
         vol_surge = recent_vol / avg_vol if avg_vol > 0 else 0
@@ -371,21 +341,19 @@ def generate_signals(markets_df=None):
         tp = "-"
         sl = "-"
         
-        # Simple volume surge strategy
         if vol_surge >= VOL_MULTIPLIER and recent_vol > BASE_VOL * avg_vol:
-            # Check price action for direction
             recent_change = (df['close'].iloc[-1] - df['open'].iloc[-1]) / df['open'].iloc[-1]
             
-            if recent_change > 0.01:  # 1% up
+            if recent_change > 0.01:
                 signal = "LONG"
                 reason = f"Vol surge {vol_surge:.2f}x with bullish price action"
-                tp = str(round(df['close'].iloc[-1] * 1.05, 4))  # 5% TP
-                sl = str(round(df['close'].iloc[-1] * 0.97, 4))  # 3% SL
-            elif recent_change < -0.01:  # 1% down
+                tp = str(round(df['close'].iloc[-1] * 1.05, 4))
+                sl = str(round(df['close'].iloc[-1] * 0.97, 4))
+            elif recent_change < -0.01:
                 signal = "SHORT"
                 reason = f"Vol surge {vol_surge:.2f}x with bearish price action"
-                tp = str(round(df['close'].iloc[-1] * 0.95, 4))  # 5% TP
-                sl = str(round(df['close'].iloc[-1] * 1.03, 4))  # 3% SL
+                tp = str(round(df['close'].iloc[-1] * 0.95, 4))
+                sl = str(round(df['close'].iloc[-1] * 1.03, 4))
         
         signals.append({
             'Symbol': symbol,
@@ -399,9 +367,8 @@ def generate_signals(markets_df=None):
             'SL': sl
         })
         
-        # Update progress
         progress_bar.progress((i + 1) / len(markets_df))
-        time.sleep(0.5)  # Keep delay to avoid rate limits
+        time.sleep(0.5)
     
     progress_bar.empty()
     status_text.empty()
@@ -417,24 +384,21 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Market Scanner", "Active Trades", "Comp
 # Tab 1: Market Scanner
 with tab1:
     if st.button("Scan Markets"):
-        with st.spinner("Scanning all Bybit perpetual markets..."):
+        with st.spinner("Scanning all Binance perpetual markets..."):
             markets_df = fetch_all_markets(simulate_traffic)
             st.session_state.signals = generate_signals(markets_df)
     
     if 'signals' in st.session_state and st.session_state.signals:
         signals_df = pd.DataFrame(st.session_state.signals)
         
-        # Filter options
         signal_filter = st.multiselect("Filter by Signal", 
                                        options=['LONG', 'SHORT', 'HOLD'], 
                                        default=['LONG', 'SHORT'])
         
         filtered_df = signals_df[signals_df['Signal'].isin(signal_filter)]
         
-        # Display signals table
         st.dataframe(filtered_df, use_container_width=True)
         
-        # Execute trades button
         if st.button("Execute Selected Signals"):
             actionable_signals = [s for s in st.session_state.signals if s['Signal'] != "HOLD" and s['Signal'] in signal_filter]
             results = tester.execute_trades(actionable_signals)
@@ -451,10 +415,8 @@ with tab2:
             st.info(update)
     
     if tester.active_trades:
-        # Convert active trades to DataFrame for display
         active_df = pd.DataFrame.from_dict(tester.active_trades, orient='index')
         
-        # Add current price and P&L columns
         for idx, row in active_df.iterrows():
             try:
                 ticker = exchange.fetch_ticker(idx)
@@ -463,10 +425,9 @@ with tab2:
                 
                 active_df.at[idx, 'current_price'] = current_price
                 
-                # Calculate unrealized P&L
                 if row['direction'] == "LONG":
                     pnl = ((current_price - entry_price) / entry_price) * 100
-                else:  # SHORT
+                else:
                     pnl = ((entry_price - current_price) / entry_price) * 100
                     
                 active_df.at[idx, 'unrealized_pnl'] = pnl
@@ -474,10 +435,8 @@ with tab2:
                 active_df.at[idx, 'current_price'] = "Error"
                 active_df.at[idx, 'unrealized_pnl'] = 0
         
-        # Display active trades
         st.dataframe(active_df, use_container_width=True)
         
-        # Individual trade charts
         st.subheader("Individual Trade Charts")
         selected_trade = st.selectbox("Select a trade to view", list(tester.active_trades.keys()))
         
@@ -486,7 +445,6 @@ with tab2:
             ohlcv_df = fetch_ohlcv(selected_trade, timeframe=timeframe, limit=100)
             
             if ohlcv_df is not None:
-                # Create candlestick chart
                 fig = go.Figure(data=[go.Candlestick(
                     x=ohlcv_df['timestamp'],
                     open=ohlcv_df['open'],
@@ -496,7 +454,6 @@ with tab2:
                     name="OHLC"
                 )])
                 
-                # Add entry, TP and SL lines
                 trade_data = tester.active_trades[selected_trade]
                 
                 fig.add_hline(y=trade_data['entry_price'], line_width=1, line_dash="dash", 
@@ -510,7 +467,6 @@ with tab2:
                     fig.add_hline(y=trade_data['sl_price'], line_width=1, line_dash="dash", 
                                  line_color="red", annotation_text="SL")
                 
-                # Layout
                 fig.update_layout(
                     title=f"{selected_trade} - {timeframe} Chart",
                     xaxis_title="Date",
@@ -526,20 +482,16 @@ with tab2:
 with tab3:
     st.header("Completed Trades")
     
-    # Reset button with confirmation
     if st.button("Reset All Trades"):
         if st.checkbox("I confirm I want to reset all trades"):
             result = tester.reset_all_trades()
             st.success(result)
     
-    # Get completed trades
     stats, completed_df = tester.get_performance_report()
     
     if len(completed_df) > 0:
-        # Display completed trades
         st.dataframe(completed_df, use_container_width=True)
         
-        # Trade outcomes pie chart
         if 'pct_change' in completed_df.columns:
             fig = px.pie(
                 names=['Winning Trades', 'Losing Trades'],
@@ -564,9 +516,7 @@ with tab4:
         stats_df = pd.DataFrame([stats])
         st.dataframe(stats_df, use_container_width=True)
         
-        # Show performance charts if we have data
         if len(completed_df) > 0 and 'pct_change' in completed_df.columns:
-            # Cumulative performance chart
             if 'exit_time' in completed_df.columns:
                 completed_df_sorted = completed_df.sort_values('exit_time')
                 completed_df_sorted['cumulative_pnl'] = completed_df_sorted['pct_change'].cumsum()
@@ -580,7 +530,6 @@ with tab4:
                 )
                 st.plotly_chart(fig, use_container_width=True)
             
-            # P&L distribution
             fig = px.histogram(
                 completed_df,
                 x='pct_change',
@@ -590,7 +539,7 @@ with tab4:
             )
             st.plotly_chart(fig, use_container_width=True)
     else:
-        st.info(stats)  # This will display "No completed trades yet"
+        st.info(stats)
 
 # Tab 5: Database Management
 with tab5:
@@ -604,11 +553,9 @@ with tab5:
             conn = sqlite3.connect('trading_state.db')
             cursor = conn.cursor()
             
-            # Get database size
             cursor.execute("SELECT page_count * page_size FROM pragma_page_count(), pragma_page_size()")
             db_size = cursor.fetchone()[0]
             
-            # Get table information
             cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
             tables = cursor.fetchall()
             
